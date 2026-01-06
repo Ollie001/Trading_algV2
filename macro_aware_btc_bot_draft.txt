@@ -1,0 +1,304 @@
+
+MACRO-AWARE BTC TRADING BOT
+SYSTEM DESIGN & IMPLEMENTATION DRAFT
+===================================
+
+PURPOSE
+-------
+This document defines the architecture, logic, and implementation plan for a
+macro-aware BTC trading bot. The system combines macro indicators, crypto capital
+flow, news-based regime awareness, and deterministic execution logic.
+
+CoinGlass liquidity heatmaps are intentionally NOT implemented in v1 due to API
+subscription cost. Liquidity logic in v1 uses exchange-native and price-based
+proxies only.
+
+------------------------------------------------------------
+1. HIGH-LEVEL ARCHITECTURE
+------------------------------------------------------------
+
+Layered decision stack:
+
+[ Macro & News Regime Layer ]   (slow)
+            ↓
+[ Capital Flow Layer ]          (medium)
+            ↓
+[ Liquidity / Path Layer ]      (medium, partial v1)
+            ↓
+[ Execution Layer ]             (fast)
+            ↓
+[ Risk & Trade Management ]
+
+Each layer gates or modifies downstream behavior.
+
+------------------------------------------------------------
+2. DATA SOURCES (V1)
+------------------------------------------------------------
+
+2.1 Exchange Execution (LIVE)
+- Bybit REST API
+- Bybit WebSocket API
+
+Used for:
+- Order book (L2)
+- Trades
+- OHLCV
+- Funding rates
+- Position & order management
+
+2.2 Crypto Capital Flow
+- BTC Dominance (BTC.D)
+- Source: CoinGecko or CoinMarketCap
+- Timeframes: 4H / 1D
+
+2.3 Macro Indicator
+- US Dollar Index (DXY)
+- Source: Twelve Data or Alpha Vantage
+- Timeframes: 4H / 1D
+
+2.4 News & Events
+- Live crypto & macro news API
+- No delayed feeds
+- Optional pretrained sentiment scoring
+
+Used ONLY to classify regime alignment (not entries).
+
+2.5 Liquidity Heatmaps
+- CoinGlass API NOT IMPLEMENTED IN V1
+- Deferred due to cost
+
+V1 liquidity proxies:
+- Prior day high/low
+- Session highs/lows
+- Visible range high/low
+- Order book imbalance zones
+
+------------------------------------------------------------
+3. REGIME CLASSIFICATION
+------------------------------------------------------------
+
+3.1 Regime States
+- RISK_ON
+- RISK_OFF
+- DECOUPLED
+- CHOP
+
+3.2 Inputs
+- DXY trend (4H / 1D)
+- BTC dominance trend (4H / 1D)
+- News classification (event-based)
+
+3.3 Regime Behavior
+- Determines:
+  - Whether trading is allowed
+  - Position size multiplier
+  - Trade type preference
+  - Stop/target behavior
+
+------------------------------------------------------------
+4. EXECUTION LOGIC
+------------------------------------------------------------
+
+Execution timeframes:
+- Primary: 5M
+- Optional refinement: 1M
+
+Execution signals:
+- CHOCH / BOS
+- Sweep → return behavior
+- Orderflow imbalance
+- Local liquidity interaction
+
+Trades are allowed ONLY if:
+1. Regime permits trading
+2. Capital flow bias supports trade type
+3. Liquidity target exists
+4. LTF structure confirms
+
+------------------------------------------------------------
+5. RISK MANAGEMENT
+------------------------------------------------------------
+
+Risk is dynamic and regime-dependent.
+
+Examples:
+- Risk-Off → reduced size, faster exits
+- Risk-On → allow runners
+- Chop → minimal size or no trades
+
+Stops placed beyond liquidity, not inside.
+
+------------------------------------------------------------
+6. LOCAL WEB UI
+------------------------------------------------------------
+
+Purpose:
+- Transparency
+- Debugging
+- Monitoring (read-only)
+
+Displays:
+- Current regime
+- DXY trend
+- BTC dominance trend
+- News alignment
+- Active bias
+- Position size multiplier
+- Open trades & PnL
+- Execution logs with reason codes
+
+Suggested stack:
+- Backend: Python (FastAPI)
+- Frontend: Local web UI (HTML/JS or React)
+- WebSocket updates
+
+------------------------------------------------------------
+7. MODULE-BY-MODULE IMPLEMENTATION PLAN
+------------------------------------------------------------
+
+MODULE 1: CONFIG & CONSTANTS
+- API keys
+- Timeframe definitions
+- Risk parameters
+- Threshold values
+
+MODULE 2: DATA INGESTION
+- Bybit WebSocket client
+- Bybit REST client
+- DXY fetcher
+- BTC dominance fetcher
+- News feed listener
+
+MODULE 3: NEWS CLASSIFICATION
+- Keyword + category-based classifier
+- Optional sentiment score
+- Impact window tagging
+- Alignment detection (aligned / decoupled / risk)
+
+MODULE 4: REGIME ENGINE
+- Computes regime state
+- Maintains state machine
+- Prevents rapid flipping
+- Outputs regime permissions
+
+MODULE 5: CAPITAL FLOW ANALYZER
+- BTC dominance trend detection
+- Momentum & slope calculation
+- Bias output (continuation vs mean reversion)
+
+MODULE 6: LIQUIDITY ENGINE (V1)
+- Session highs/lows
+- PDH/PDL
+- Visible range liquidity
+- Order book imbalance zones
+
+MODULE 7: EXECUTION ENGINE (V1 - DETERMINISTIC, REGIME-SWITCHED)
+- Goal: Provide objective, backtestable entries without SMC/CHOCH/BOS complexity.
+- Primary execution timeframe: 5M (optional 1M refinement later).
+
+7.1 Two-Mode Execution
+A) TREND MODE: Volatility Breakout (Donchian + ATR)
+   - Use when: REGIME in {RISK_ON, DECOUPLED} AND trend permission == TRUE
+   - Inputs (5M):
+     - DonchianHigh_N (e.g., N=20): rolling highest high
+     - DonchianLow_N  (e.g., N=20): rolling lowest low
+     - ATR_14
+     - Optional: 1H EMA slope as a trend confirmation filter (on/off switch)
+   - Entry rules:
+     - Long: Close crosses above DonchianHigh_N AND filters pass
+     - Short: Close crosses below DonchianLow_N AND filters pass
+   - Initial stop:
+     - Long stop = entry_price - (k_atr_stop * ATR_14)  (e.g., k_atr_stop=1.5)
+     - Short stop = entry_price + (k_atr_stop * ATR_14)
+     - Alternative stop (optional): opposite Donchian band with buffer
+   - Take profit / management:
+     - Partial take at +1R (configurable fraction, e.g., 50%)
+     - Remainder trails using ATR (e.g., trail = k_atr_trail * ATR_14; k_atr_trail=2.0)
+     - Time stop optional (close after X candles if no progress)
+   - Reason codes (for UI/logs):
+     - EXEC_MODE=TREND_BREAKOUT
+     - SIGNAL=DonchianBreak
+     - FILTERS={RegimeOK, TrendOK(optional), VolOK(optional)}
+
+B) CHOP MODE: VWAP Mean Reversion
+   - Use when: REGIME == CHOP (or when trend permission == FALSE)
+   - Inputs (intraday):
+     - VWAP (session)
+     - VWAP bands (choose ONE method):
+       (1) StdDev bands: VWAP ± (k_vwap * stdev) over rolling window
+       (2) ATR bands:    VWAP ± (k_vwap_atr * ATR_14)
+   - Entry rules:
+     - Long: price trades below lower band AND closes back above lower band
+     - Short: price trades above upper band AND closes back below upper band
+     - Optional filter: do not fade strong trends (e.g., 1H EMA slope magnitude > threshold)
+   - Initial stop:
+     - Long stop = recent swing low - buffer (or lower band - buffer)
+     - Short stop = recent swing high + buffer (or upper band + buffer)
+     - buffer can be a fraction of ATR (e.g., 0.3 * ATR_14)
+   - Targets / management:
+     - Primary target = VWAP (full or partial)
+     - Optional secondary target = opposite band (only if conditions remain CHOP)
+   - Reason codes (for UI/logs):
+     - EXEC_MODE=VWAP_REVERSION
+     - SIGNAL=BandReentry
+     - FILTERS={RegimeCHOP, AntiTrendOK(optional)}
+
+7.2 Stand-Down Rules (Execution-Level Safety)
+- If spread widens beyond threshold OR volatility is extreme (news shock), block new entries.
+- If REGIME == RISK_OFF:
+  - Option A: stand down completely
+  - Option B: allow trades only with reduced size and stricter filters (config switch)
+
+7.3 Parameter Defaults (Configurable)
+- Donchian N = 20
+- ATR period = 14
+- k_atr_stop = 1.5
+- k_atr_trail = 2.0
+- VWAP band method = ATR bands
+- k_vwap_atr = 1.0 (start), adjust after testing
+- Partial take at 1R = 50% (optional)
+
+7.4 Outputs
+- Signal object:
+  - side (long/short/none)
+  - entry_price (market/limit decision in Trade Manager)
+  - stop_price
+  - target(s)
+  - exec_mode
+  - reason_codes
+
+
+MODULE 8: RISK MANAGER
+- Position sizing
+- Max risk enforcement
+- Trade duration rules
+
+MODULE 9: TRADE MANAGER
+- Order placement
+- Position tracking
+- Exit handling
+- Error recovery
+
+MODULE 10: WEB UI BACKEND
+- Exposes bot state
+- Serves metrics & logs
+- WebSocket broadcaster
+
+MODULE 11: WEB UI FRONTEND
+- Dashboard layout
+- Live status panels
+- Trade feed
+- PnL display
+
+------------------------------------------------------------
+8. FUTURE ENHANCEMENTS
+------------------------------------------------------------
+
+- CoinGlass liquidity heatmap integration
+- Statistical regime classifier
+- ML-based news sentiment model
+- Multi-asset expansion (ETH, majors)
+
+------------------------------------------------------------
+END OF DOCUMENT
+------------------------------------------------------------
