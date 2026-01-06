@@ -14,6 +14,8 @@ The system is built with a layered decision stack:
 
 ## Current Implementation Status
 
+All modules described in the architecture are implemented and wired into the FastAPI backend.
+
 ### Module 1: Config & Constants ✅
 - API key management via `.env`
 - Timeframe definitions
@@ -22,25 +24,47 @@ The system is built with a layered decision stack:
 - Regime state definitions and permissions
 
 ### Module 2: Data Ingestion ✅
-- **Bybit WebSocket Client** - Real-time orderbook, trades, and klines
+- **Bybit WebSocket Client** - Real-time orderbook, trades, and klines (bounded queues + throttled publishing)
 - **Bybit REST Client** - Historical data, funding rates, and market info
-- **DXY Fetcher** - US Dollar Index from Twelve Data API
+- **DXY Fetcher** - US Dollar Index from Twelve Data API (or Alpha Vantage)
 - **BTC Dominance Fetcher** - Bitcoin dominance from CoinGecko API
-- **News Feed Listener** - Real-time crypto and macro news from NewsAPI
+- **News Feed Listener** - Real-time crypto and macro news (provider depends on API key availability)
 
 ### Module 3: News Classification ✅
-- **Keyword-Based Categorization** - Macro and crypto event classification
-- **Sentiment Analysis** - Scoring from -1.0 (negative) to +1.0 (positive)
-- **Impact Level Detection** - HIGH, MEDIUM, LOW classification
-- **Alignment Detection** - ALIGNED, DECOUPLED, or NEUTRAL with broader markets
-- **Regime Signal Aggregation** - Combines active news for regime input
+- Keyword-based categorization + sentiment scoring (-1.0 to +1.0)
+- Impact level detection (HIGH / MEDIUM / LOW)
+- Market alignment detection (ALIGNED / DECOUPLED / NEUTRAL)
+- Signal aggregation for regime input
 
 ### Module 4: Regime Engine ✅
-- **Trend Analyzer** - DXY and BTC dominance trend detection with linear regression
-- **State Machine** - RISK_ON, RISK_OFF, DECOUPLED, CHOP regime states
-- **Anti-Flipping Logic** - Prevents rapid state changes (min 1 hour in state)
-- **Multi-Input Scoring** - Weighted DXY (40%), BTC.D (30%), News (30%)
-- **Trading Permissions** - Dynamic position sizing and trade type preferences
+- DXY + BTC.D trend detection
+- State machine: RISK_ON, RISK_OFF, DECOUPLED, CHOP
+- Anti-flipping logic (minimum time-in-state)
+- Multi-input scoring (DXY / BTC.D / News)
+- Trading permissions (dynamic sizing + allowed actions)
+
+### Module 5: Capital Flow Analyzer ✅
+- BTC dominance trend analysis and regime contribution
+
+### Module 6: Liquidity / Path Engine ✅
+- Orderbook-derived liquidity / imbalance helpers
+- Session highs/lows & simple structure cues for execution context
+
+### Module 7: Execution Engine ✅
+- Deterministic entry/exit logic (non-SMC) designed for automation
+
+### Module 8: Risk Manager ✅
+- Dynamic position sizing, max position size, daily loss limits, kill-switch hooks
+
+### Module 9: Trade Manager ✅
+- Order placement + tracking, position state, basic safety checks
+
+### Module 10: Web UI Backend ✅
+- API endpoints for bot status + latest data snapshots
+
+### Module 11: Frontend UI ✅
+- Lightweight local dashboard that polls `/api/status`
+
 
 ## Installation
 
@@ -79,9 +103,9 @@ NEWS_API_KEY=your_news_api_key_here
 ### 3. Get API Keys
 
 - **Bybit**: [https://www.bybit.com/app/user/api-management](https://www.bybit.com/app/user/api-management)
-- **Twelve Data**: [https://twelvedata.com/pricing](https://twelvedata.com/pricing) (Free tier available)
-- **CoinGecko**: [https://www.coingecko.com/en/api/pricing](https://www.coingecko.com/en/api/pricing) (Free tier available)
-- **NewsAPI**: [https://newsapi.org/pricing](https://newsapi.org/pricing) (Free tier available)
+- **Twelve Data**: [https://twelvedata.com/pricing](https://twelvedata.com/pricing) (availability depends on provider plan)
+- **CoinGecko**: [https://www.coingecko.com/en/api/pricing](https://www.coingecko.com/en/api/pricing) (availability depends on provider plan)
+- **NewsAPI**: [https://newsapi.org/pricing](https://newsapi.org/pricing) (availability depends on provider plan)
 
 ## Running the Application
 
@@ -161,8 +185,9 @@ trading_algV2/
 
 ### Real-Time Data Streaming
 - WebSocket connections to Bybit for orderbook, trades, and klines
-- Automatic reconnection with exponential backoff
+- Automatic reconnection with exponential backoff (+ jitter)
 - Heartbeat mechanism to keep connections alive
+- Bounded queues + throttled publishing to prevent lag under high message rates
 
 ### Macro Indicators
 - DXY (US Dollar Index) tracking
@@ -173,20 +198,6 @@ trading_algV2/
 - Real-time updates every 5 seconds
 - Visual representation of all data sources
 - Clean, modern UI with gradient design
-
-## Next Steps
-
-The following modules are planned for future implementation:
-
-- **Module 3**: News Classification - Sentiment analysis and impact scoring
-- **Module 4**: Regime Engine - Market regime detection (RISK_ON, RISK_OFF, DECOUPLED, CHOP)
-- **Module 5**: Capital Flow Analyzer - BTC dominance trend analysis
-- **Module 6**: Liquidity Engine - Session highs/lows, order book imbalance
-- **Module 7**: Execution Engine - Entry/exit logic with structure detection
-- **Module 8**: Risk Manager - Dynamic position sizing
-- **Module 9**: Trade Manager - Order placement and tracking
-- **Module 10**: Advanced Web UI Backend - WebSocket broadcasting
-- **Module 11**: Enhanced Frontend - Interactive charts and controls
 
 ## Development
 
@@ -262,5 +273,6 @@ This is a personal trading bot project. Use at your own risk.
 ## Disclaimer
 
 This software is for educational purposes only. Trading cryptocurrencies carries significant risk. Never trade with money you cannot afford to lose.
-#   T r a d i n g _ a l g V 2  
+#   T r a d i n g _ a l g V 2 
+ 
  

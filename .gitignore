@@ -39,3 +39,8 @@ dist/
 
 # mypy
 .mypy_cache/
+
+nul
+
+.claude/
+

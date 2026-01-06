@@ -7,6 +7,7 @@ import logging
 from typing import List, Optional
 from datetime import datetime, timedelta
 import httpx
+import asyncio
 
 from src.config import settings
 from src.models import BTCDominanceData
@@ -22,12 +23,57 @@ class BTCDominanceFetcher:
     def __init__(self):
         self.api_key = settings.coingecko_api_key  # Renamed for backward compatibility
         self.base_url = "https://api.coincap.io/v2"
+        self.max_retries = 3
+        self.base_delay = 2  # Base delay in seconds for exponential backoff
 
     def _get_headers(self) -> dict:
         """CoinCap accepts optional API key for higher rate limits"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json"
+        }
         if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-        return {}
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _retry_request(self, client: httpx.AsyncClient, url: str, params: dict, headers: dict, max_retries: int = 3):
+        """
+        Make HTTP request with exponential backoff retry logic
+        """
+        for attempt in range(max_retries):
+            try:
+                # Add a small delay before request to avoid rate limiting
+                if attempt > 0:
+                    delay = self.base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"Retrying in {delay}s (attempt {attempt + 1}/{max_retries})...")
+                    await asyncio.sleep(delay)
+
+                response = await client.get(url, params=params, headers=headers, timeout=30.0)
+                response.raise_for_status()
+                return response
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        delay = self.base_delay * (2 ** (attempt + 1))
+                        logger.warning(f"Rate limited (429). Waiting {delay}s before retry...")
+                        await asyncio.sleep(delay)
+                        continue
+                raise
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    logger.warning(f"Connection error on attempt {attempt + 1}: {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except httpx.HTTPError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"HTTP error on attempt {attempt + 1}: {e}")
+                    continue
+                raise
+
+        raise Exception(f"Failed after {max_retries} retries")
 
     async def get_current_dominance(self) -> Optional[BTCDominanceData]:
         """
@@ -42,14 +88,15 @@ class BTCDominanceFetcher:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                logger.debug(f"Fetching BTC dominance from CoinCap: {url}")
+                response = await self._retry_request(
+                    client,
                     url,
-                    params=params,
-                    headers=self._get_headers(),
-                    timeout=10.0
+                    params,
+                    self._get_headers(),
+                    self.max_retries
                 )
-                response.raise_for_status()
                 data = response.json()
 
                 assets = data.get("data", [])
@@ -132,14 +179,14 @@ class BTCDominanceFetcher:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                response = await self._retry_request(
+                    client,
                     url,
-                    params=params,
-                    headers=self._get_headers(),
-                    timeout=10.0
+                    params,
+                    self._get_headers(),
+                    self.max_retries
                 )
-                response.raise_for_status()
                 data = response.json()
 
                 history = data.get("data", [])

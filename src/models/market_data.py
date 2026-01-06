@@ -1,6 +1,9 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from __future__ import annotations
+
 from datetime import datetime
+from typing import List, Optional, Literal
+
+from pydantic import BaseModel, Field
 
 
 class OrderBookLevel(BaseModel):
@@ -20,7 +23,8 @@ class Trade(BaseModel):
     timestamp: datetime
     price: float
     quantity: float
-    side: str
+    # Enforce a strict enum so upstream parsing bugs are caught early.
+    side: Literal["buy", "sell"]
 
 
 class OHLCV(BaseModel):
@@ -64,4 +68,5 @@ class NewsItem(BaseModel):
     url: Optional[str] = None
     category: Optional[str] = None
     sentiment_score: Optional[float] = Field(default=None, ge=-1.0, le=1.0)
-    impact_level: Optional[str] = Field(default="LOW", pattern="^(HIGH|MEDIUM|LOW)$")
+    # Narrow the type to a strict enum for safer downstream logic.
+    impact_level: Literal["HIGH", "MEDIUM", "LOW"] = Field(default="LOW")

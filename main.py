@@ -28,6 +28,7 @@ from src.liquidity_engine import LiquidityEngine
 from src.execution_engine import ExecutionEngine, ExecutionSignal
 from src.risk_manager import RiskManager
 from src.trade_manager import TradeManager
+from src.timeframe_analyzer import TimeframeAnalyzer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +55,7 @@ class DataManager:
         self.execution_engine: Optional[ExecutionEngine] = None
         self.risk_manager: Optional[RiskManager] = None
         self.trade_manager: Optional[TradeManager] = None
+        self.timeframe_analyzer: Optional[TimeframeAnalyzer] = None
 
         self.latest_orderbook: Optional[OrderBook] = None
         self.latest_trade: Optional[Trade] = None
@@ -126,6 +128,9 @@ class DataManager:
                     if self.regime_engine:
                         self.regime_engine.trend_analyzer.add_dxy_data(dxy_data)
 
+                # Add delay between API calls to avoid rate limiting
+                await asyncio.sleep(3)
+
                 btc_dom_data = await self.btc_dom_fetcher.get_current_dominance()
                 if btc_dom_data:
                     self.latest_btc_dom = btc_dom_data
@@ -140,10 +145,12 @@ class DataManager:
                         self.capital_flow.add_data(btc_dom_data)
                         self.latest_capital_flow = self.capital_flow.analyze()
 
+                # Sleep for 1 hour between macro data updates
                 await asyncio.sleep(3600)
 
             except Exception as e:
                 logger.error(f"Error updating macro data: {e}")
+                # On error, wait 5 minutes before retrying
                 await asyncio.sleep(300)
 
     async def update_regime(self):
@@ -280,10 +287,11 @@ class DataManager:
         self.execution_engine = ExecutionEngine()
         self.risk_manager = RiskManager()
         self.trade_manager = TradeManager(bybit_rest_client=self.bybit_rest)
+        self.timeframe_analyzer = TimeframeAnalyzer(bybit_rest=self.bybit_rest)
 
         # Start in dry-run mode for safety
-        self.trade_manager.enable_live_trading()  # Change to disable_live_trading() for dry-run
-        logger.warning("⚠️  Trade Manager in DRY-RUN mode - no real orders will be placed")
+        self.trade_manager.disable_live_trading()
+        logger.info("✅ Trade Manager in DRY-RUN mode - no real orders will be placed")
 
         self.bybit_ws = BybitWebSocketClient(symbol="BTCUSDT")
         self.bybit_ws.on_orderbook(self.on_orderbook)
@@ -681,6 +689,49 @@ async def get_trade_history():
     ]
 
 
+@app.get("/api/timeframe-analysis")
+async def get_timeframe_analysis():
+    """Get multi-timeframe bias analysis"""
+    if not data_manager.timeframe_analyzer:
+        return {"error": "Timeframe analyzer not initialized"}
+
+    try:
+        # Get liquidity levels
+        liquidity_levels = []
+        if data_manager.liquidity_engine:
+            liquidity_levels = data_manager.liquidity_engine.get_all_levels()
+
+        # Analyze all timeframes
+        analysis = await data_manager.timeframe_analyzer.analyze_all_timeframes(
+            symbol="BTCUSDT",
+            regime=data_manager.latest_regime,
+            capital_flow=data_manager.latest_capital_flow,
+            liquidity_levels=liquidity_levels,
+        )
+
+        # Convert to dict format
+        result = {}
+        for tf_name, bias in analysis.items():
+            result[tf_name] = {
+                "timeframe": bias.timeframe,
+                "bias": bias.bias,
+                "confidence": bias.confidence,
+                "current_price": bias.current_price,
+                "trend_direction": bias.trend_direction,
+                "trend_strength": bias.trend_strength,
+                "ma_alignment": bias.ma_alignment,
+                "supporting_factors": bias.supporting_factors,
+                "conflicting_factors": bias.conflicting_factors,
+                "explanation": bias.explanation,
+                "timestamp": bias.timestamp.isoformat(),
+            }
+
+        return result
+    except Exception as e:
+        logger.error(f"Error in timeframe analysis: {e}")
+        return {"error": str(e)}
+
+
 @app.get("/api/status")
 async def get_status():
     regime_data = None
@@ -722,15 +773,23 @@ async def get_status():
 
 @app.get("/ui", response_class=HTMLResponse)
 async def ui():
-    from src.utils.ui_template import UI_HTML
-    return UI_HTML
+    # Use exec to load the UI_HTML directly from file, bypassing module cache
+    import os
+    ui_file_path = os.path.join(os.path.dirname(__file__), "src", "utils", "ui_template.py")
+
+    with open(ui_file_path, "r", encoding="utf-8") as f:
+        code = f.read()
+
+    # Execute the module code to get UI_HTML
+    namespace = {}
+    exec(code, namespace)
+    ui_html = namespace.get("UI_HTML", "")
+
+    logger.info(f"[UI DEBUG] Loaded UI from: {ui_file_path}")
+    logger.info(f"[UI DEBUG] UI HTML length: {len(ui_html)}")
+    has_timeframe_tab = "switchTab('timeframes')" in ui_html
+    logger.info(f"[UI DEBUG] Has timeframe tab: {has_timeframe_tab}")
+
+    return ui_html
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug
-    )
